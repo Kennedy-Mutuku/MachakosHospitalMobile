@@ -1,48 +1,51 @@
 {
-  "expo": {
-    "name": "MachakosHospitalMobile",
-    "slug": "MachakosHospitalMobile",
-    "version": "1.0.0",
-    "orientation": "portrait",
-    "icon": "./assets/images/icon.png",
-    "scheme": "machakoshospitalmobile",
-    "userInterfaceStyle": "automatic",
-    "newArchEnabled": true,
-    "ios": {
-      "supportsTablet": true
-    },
-    "android": {
-      "adaptiveIcon": {
-        "foregroundImage": "./assets/images/adaptive-icon.png",
-        "backgroundColor": "#ffffff"
+    "expo": {
+      "name": "Machakos Hospital",
+      "slug": "MachakosHospitalMobile",
+      "version": "1.0.0",
+      "orientation": "portrait",
+      "icon": "./assets/icon.png",  // 💖 Your red heart icon
+      "scheme": "machakoshospitalmobile",
+      "userInterfaceStyle": "automatic",
+      "newArchEnabled": true,
+  
+      "ios": {
+        "supportsTablet": true,
+        "icon": "./assets/icon.png"  // 💖 Same icon on iOS
       },
-      "edgeToEdgeEnabled": true
-    },
-    "web": {
-      "bundler": "metro",
-      "output": "static",
-      "favicon": "./assets/images/favicon.png"
-    },
-    "plugins": [
-      "expo-router",
-      [
-        "expo-splash-screen",
-        {
-          "image": "./assets/images/splash-icon.png",
-          "imageWidth": 200,
-          "resizeMode": "contain",
-          "backgroundColor": "#ffffff"
+  
+      "android": {
+        "package": "com.kennedymutuku.MachakosHospitalMobile",
+        "icon": "./assets/icon.png",  // 💖 Use red heart directly
+        "edgeToEdgeEnabled": true
+      },
+  
+      "web": {
+        "favicon": "./assets/favicon.png"
+      },
+  
+      "plugins": [
+        "expo-router",
+        [
+          "expo-splash-screen",
+          {
+            "image": "./assets/splash-icon.png",
+            "resizeMode": "contain",
+            "backgroundColor": "#ffffff"
+          }
+        ]
+      ],
+  
+      "experiments": {
+        "typedRoutes": true
+      },
+  
+      "extra": {
+        "router": {},
+        "eas": {
+          "projectId": "e0a2378b-3efa-4bc7-89a2-46d366ca7224"
         }
-      ]
-    ],
-    "experiments": {
-      "typedRoutes": true
-    },
-    "extra": {
-      "router": {},
-      "eas": {
-        "projectId": "e0a2378b-3efa-4bc7-89a2-46d366ca7224"
       }
     }
   }
-}
+  
