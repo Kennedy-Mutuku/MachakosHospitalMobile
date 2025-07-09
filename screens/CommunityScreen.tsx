@@ -11,6 +11,7 @@ import {
   Keyboard,
   Pressable,
   Alert,
+  ImageBackground,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { db } from './firebaseConfig';
@@ -25,6 +26,7 @@ import {
   doc,
   deleteDoc,
   getDocs,
+  where,
 } from 'firebase/firestore';
 
 export default function CommunityScreen() {
@@ -35,88 +37,229 @@ export default function CommunityScreen() {
   const [posts, setPosts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [onlineUsers, setOnlineUsers] = useState([]);
+  const [chatPartner, setChatPartner] = useState(null);
 
-  // 🧠 Restore user info
+  // Generate consistent chat ID for any two users (sorted phones)
+  const getChatId = (phone1, phone2) => [phone1, phone2].sort().join('_');
+
+  // Load user info and presence on mount
   useEffect(() => {
-    const loadUser = async () => {
-      const savedName = await AsyncStorage.getItem('userName');
-      const savedPhone = await AsyncStorage.getItem('userPhone');
-      if (savedName && savedPhone) {
-        setName(savedName);
-        setPhone(savedPhone);
-        setIsUserSet(true);
+    (async () => {
+      try {
+        const savedName = await AsyncStorage.getItem('userName');
+        const savedPhone = await AsyncStorage.getItem('userPhone');
+        if (savedName && savedPhone) {
+          setName(savedName);
+          setPhone(savedPhone);
+          setIsUserSet(true);
+          await setDoc(doc(db, 'presence', savedPhone), {
+            name: savedName,
+            phone: savedPhone,
+            lastActive: serverTimestamp(),
+          });
+        }
+      } catch (e) {
+        console.error('Error loading user:', e);
       }
-    };
-    loadUser();
+    })();
   }, []);
 
-  // 🔐 Save user info & register presence
+  // Join the chat by saving user info and presence
   const handleJoin = async () => {
-    if (!name.trim() || !phone.trim()) return;
-
-    await AsyncStorage.setItem('userName', name);
-    await AsyncStorage.setItem('userPhone', phone);
-    setIsUserSet(true);
-
-    await setDoc(doc(db, 'presence', phone), {
-      name,
-      phone,
-      lastActive: serverTimestamp(),
-    });
+    if (!name.trim() || !phone.trim()) {
+      Alert.alert('Please enter both name and phone number.');
+      return;
+    }
+    try {
+      await AsyncStorage.setItem('userName', name);
+      await AsyncStorage.setItem('userPhone', phone);
+      setIsUserSet(true);
+      await setDoc(doc(db, 'presence', phone), {
+        name,
+        phone,
+        lastActive: serverTimestamp(),
+      });
+    } catch (e) {
+      console.error('Error joining:', e);
+    }
   };
 
-  // 💬 Send message
+  // Handle selecting a user to chat with
+  const handleSelectChatPartner = (partner) => {
+    setChatPartner(partner);
+    setLoading(true);
+    setPosts([]);
+  };
+
+  // Listen for messages in the current private chat
+  useEffect(() => {
+    if (!chatPartner) {
+      setPosts([]);
+      setLoading(false);
+      return;
+    }
+    const chatId = getChatId(phone, chatPartner.phone);
+    const q = query(
+      collection(db, 'messages'),
+      where('chatId', '==', chatId),
+      orderBy('timestamp', 'desc')
+    );
+
+    const unsubscribe = onSnapshot(
+      q,
+      (snapshot) => {
+        const loadedPosts = snapshot.docs.map((doc) => ({
+          id: doc.id,
+          ...doc.data(),
+        }));
+        setPosts(loadedPosts);
+        setLoading(false);
+
+        // Mark delivered messages as read if I'm the receiver
+        loadedPosts.forEach(async (msg) => {
+          if (msg.senderPhone !== phone && msg.status === 'delivered') {
+            try {
+              await setDoc(
+                doc(db, 'messages', msg.id),
+                { status: 'read' },
+                { merge: true }
+              );
+            } catch (e) {
+              console.error('Error updating read status:', e);
+            }
+          }
+        });
+      },
+      (e) => console.error('Messages snapshot error:', e)
+    );
+
+    return unsubscribe;
+  }, [chatPartner, phone]);
+
+  // Listen to presence, update online users and update message status from sent to delivered
+  useEffect(() => {
+    const unsubPresence = onSnapshot(
+      collection(db, 'presence'),
+      async (snapshot) => {
+        const online = snapshot.docs.map((doc) => doc.data());
+        setOnlineUsers(online);
+
+        if (chatPartner && online.some((u) => u.phone === chatPartner.phone)) {
+          // Chat partner is online, update sent messages to delivered
+          try {
+            const chatId = getChatId(phone, chatPartner.phone);
+            const messagesRef = collection(db, 'messages');
+            const messagesSnapshot = await getDocs(
+              query(messagesRef, where('chatId', '==', chatId))
+            );
+
+            const updates = [];
+
+            messagesSnapshot.docs.forEach((docSnap) => {
+              const msg = docSnap.data();
+              if (msg.senderPhone === phone && msg.status === 'sent') {
+                updates.push(
+                  setDoc(
+                    doc(db, 'messages', docSnap.id),
+                    { status: 'delivered' },
+                    { merge: true }
+                  )
+                );
+              }
+            });
+
+            await Promise.all(updates);
+          } catch (e) {
+            console.error('Error updating delivered status:', e);
+          }
+        }
+      },
+      (e) => console.error('Presence snapshot error:', e)
+    );
+    return unsubPresence;
+  }, [phone, chatPartner]);
+
+  // Send a new message in the current chat
   const handlePost = async () => {
     if (!post.trim()) return;
-    await addDoc(collection(db, 'messages'), {
-      content: post,
-      senderName: name,
-      senderPhone: phone,
-      timestamp: serverTimestamp(),
-    });
-    setPost('');
+    if (!chatPartner) {
+      Alert.alert('Select a user to chat with first!');
+      return;
+    }
+    try {
+      const chatId = getChatId(phone, chatPartner.phone);
+      await addDoc(collection(db, 'messages'), {
+        content: post,
+        senderName: name,
+        senderPhone: phone,
+        chatId,
+        timestamp: serverTimestamp(),
+        status: 'sent',
+      });
+      setPost('');
+    } catch (e) {
+      console.error('Post error:', e);
+    }
   };
 
-  // 🧹 Clear chat messages
-  const handleClearChat = async () => {
+  // Clear all messages in current chat
+  const handleClearChat = () => {
+    if (!chatPartner) {
+      Alert.alert('Select a chat first to clear messages.');
+      return;
+    }
     Alert.alert('Delete All Messages?', 'This action cannot be undone.', [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Delete All',
         style: 'destructive',
         onPress: async () => {
-          const messagesRef = collection(db, 'messages');
-          const snapshot = await getDocs(messagesRef);
-          const deletions = snapshot.docs.map((doc) => deleteDoc(doc.ref));
-          await Promise.all(deletions);
+          try {
+            const chatId = getChatId(phone, chatPartner.phone);
+            const messagesRef = collection(db, 'messages');
+            const snapshot = await getDocs(
+              query(messagesRef, where('chatId', '==', chatId))
+            );
+            await Promise.all(snapshot.docs.map((doc) => deleteDoc(doc.ref)));
+            setPosts([]);
+          } catch (e) {
+            console.error('Delete error:', e);
+          }
         },
       },
     ]);
   };
 
-  // 🔁 Realtime messages
-  useEffect(() => {
-    const q = query(collection(db, 'messages'), orderBy('timestamp', 'desc'));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const msgs = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
-      setPosts(msgs);
-      setLoading(false);
-    });
-    return unsubscribe;
-  }, []);
+  // Tick icons for message status
+  const Tick = ({ color }) => (
+    <Text style={{ color, fontWeight: 'bold', marginLeft: 4, fontSize: 16 }}>✓</Text>
+  );
+  const DoubleTick = ({ color }) => (
+    <Text style={{ color, fontWeight: 'bold', marginLeft: 4, fontSize: 16 }}>✓✓</Text>
+  );
 
-  // 🟢 Realtime presence
-  useEffect(() => {
-    const unsubPresence = onSnapshot(collection(db, 'presence'), (snapshot) => {
-      const online = snapshot.docs.map(doc => doc.data());
-      setOnlineUsers(online);
-    });
-    return unsubPresence;
-  }, []);
-
-  // 📦 Render message
+  // Render each message bubble
   const renderItem = ({ item }) => {
     const isMine = item.senderPhone === phone;
+
+    // Format timestamp from Firestore timestamp to HH:mm
+    const time = item.timestamp?.toDate
+      ? item.timestamp.toDate()
+      : item.timestamp
+      ? new Date(item.timestamp)
+      : null;
+
+    const formattedTime = time
+      ? time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      : '';
+
+    let tickElement = null;
+    if (isMine) {
+      if (item.status === 'sent') tickElement = <Tick color="gray" />;
+      else if (item.status === 'delivered') tickElement = <DoubleTick color="gray" />;
+      else if (item.status === 'read') tickElement = <DoubleTick color="#007aff" />;
+    }
+
     return (
       <View
         style={[
@@ -125,186 +268,177 @@ export default function CommunityScreen() {
         ]}
       >
         <View style={styles.avatar}>
-          <Text style={styles.avatarText}>{item.senderName?.charAt(0).toUpperCase() || '?'}</Text>
+          <Text style={styles.avatarText}>
+            {item.senderName?.charAt(0).toUpperCase() || '?'}
+          </Text>
         </View>
         <View
           style={[
             styles.messageBubble,
             isMine ? styles.myMessage : styles.otherMessage,
+            { flexDirection: 'row', alignItems: 'center' },
           ]}
         >
-          <Text style={styles.senderName}>
-            {isMine ? 'You' : `${item.senderName} (${item.senderPhone})`}
-          </Text>
           <Text style={styles.messageText}>{item.content}</Text>
-          <Text style={styles.timestamp}>
-            {item.timestamp?.toDate
-              ? item.timestamp.toDate().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-              : ''}
-          </Text>
+          {tickElement}
         </View>
+        <Text style={styles.timestamp}>{formattedTime}</Text>
       </View>
     );
   };
 
-  // 📝 Prompt for user info
-  if (!isUserSet) {
-    return (
-      <View style={styles.namePrompt}>
-        <Text style={styles.nameHeader}>📝 Enter Your Details to Join Chat</Text>
-        <TextInput
-          style={styles.nameInput}
-          placeholder="Your Full Name"
-          value={name}
-          onChangeText={setName}
-        />
-        <TextInput
-          style={styles.nameInput}
-          placeholder="Phone Number"
-          keyboardType="phone-pad"
-          value={phone}
-          onChangeText={setPhone}
-        />
-        <Pressable style={styles.nameButton} onPress={handleJoin}>
-          <Text style={{ color: 'white', fontWeight: 'bold' }}>Join Chat</Text>
-        </Pressable>
-      </View>
-    );
-  }
-
-  return (
-    <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-      <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
-        <View style={styles.container}>
-          <Text style={styles.header}>💬 Community Chat</Text>
-
-          {/* Online Users */}
-          <View style={styles.onlineBar}>
-            <Text style={styles.onlineHeader}>🟢 Online Users:</Text>
-            <FlatList
-              data={onlineUsers}
-              horizontal
-              keyExtractor={(item) => item.phone}
-              renderItem={({ item }) => (
-                <View style={styles.onlineUser}>
-                  <Text>{item.name}</Text>
-                </View>
-              )}
-            />
-          </View>
-
-          {/* Chat messages */}
+  return isUserSet ? (
+    <View style={styles.container}>
+      {/* Chat UI */}
+      {chatPartner ? (
+        <View style={styles.chatContainer}>
+          <Text style={styles.chatHeader}>{chatPartner.name}</Text>
           <FlatList
             data={posts}
             keyExtractor={(item) => item.id}
             renderItem={renderItem}
             inverted
-            contentContainerStyle={styles.chatList}
-            ListEmptyComponent={!loading && <Text style={styles.empty}>Start the conversation 👇</Text>}
+            style={styles.messagesList}
           />
-
-          {/* Input bar */}
           <View style={styles.inputContainer}>
             <TextInput
-              style={styles.input}
-              placeholder="Type a message"
+              style={styles.messageInput}
+              placeholder="Type a message..."
               value={post}
               onChangeText={setPost}
-              multiline
             />
-            <Pressable style={styles.sendButton} onPress={handlePost}>
-              <Text style={styles.sendButtonText}>Send</Text>
+            <Pressable style={styles.button} onPress={handlePost}>
+              <Text style={styles.buttonText}>Send</Text>
             </Pressable>
             <Pressable style={styles.clearButton} onPress={handleClearChat}>
-              <Text style={{ color: '#fff' }}>🧹</Text>
+              <Text style={styles.clearButtonText}>Clear Chat</Text>
             </Pressable>
           </View>
         </View>
-      </TouchableWithoutFeedback>
+      ) : (
+        <FlatList
+          data={onlineUsers}
+          keyExtractor={(item) => item.phone}
+          renderItem={({ item }) => (
+            <Pressable onPress={() => handleSelectChatPartner(item)}>
+              <View style={styles.userRow}>
+                <Text style={styles.userName}>{item.name}</Text>
+                <Text style={styles.userPhone}>({item.phone})</Text>
+              </View>
+            </Pressable>
+          )}
+        />
+      )}
+    </View>
+  ) : (
+    <KeyboardAvoidingView
+      style={styles.container}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+    >
+      <ImageBackground
+        source={{ uri: 'https://example.com/your-background-image.jpg' }}
+        style={styles.background}
+      >
+        <TextInput
+          style={styles.input}
+          placeholder="Your Name"
+          value={name}
+          onChangeText={setName}
+        />
+        <TextInput
+          style={styles.input}
+          placeholder="Your Phone Number"
+          value={phone}
+          onChangeText={setPhone}
+          keyboardType="phone-pad"
+        />
+        <Pressable style={styles.button} onPress={handleJoin}>
+          <Text style={styles.buttonText}>Join</Text>
+        </Pressable>
+      </ImageBackground>
     </KeyboardAvoidingView>
   );
 }
 
-// 🎨 Styles
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#fff' },
-  header: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    padding: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: '#eee',
-    backgroundColor: '#f7f7f7',
-    textAlign: 'center',
+  container: {
+    flex: 1,
+    backgroundColor: '#f5f5f5',
   },
-  namePrompt: {
+  input: {
+    height: 45,
+    borderColor: '#ddd',
+    borderWidth: 1,
+    marginBottom: 16,
+    paddingLeft: 12,
+    borderRadius: 8,
+    fontSize: 16,
+  },
+  button: {
+    backgroundColor: '#007aff',
+    paddingVertical: 12,
+    borderRadius: 8,
+    alignItems: 'center',
+    marginTop: 16,
+  },
+  buttonText: {
+    color: '#fff',
+    fontSize: 16,
+  },
+  background: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
     padding: 20,
-    backgroundColor: '#fff',
   },
-  nameHeader: {
-    fontSize: 18,
-    marginBottom: 16,
-    textAlign: 'center',
-  },
-  nameInput: {
-    width: '100%',
-    borderWidth: 1,
-    borderColor: '#ccc',
-    borderRadius: 8,
+  userRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
     padding: 12,
-    marginBottom: 12,
-  },
-  nameButton: {
-    backgroundColor: '#25D366',
-    paddingVertical: 10,
-    paddingHorizontal: 30,
-    borderRadius: 8,
-  },
-  onlineBar: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
     borderBottomWidth: 1,
-    borderBottomColor: '#eee',
+    borderBottomColor: '#ddd',
   },
-  onlineHeader: {
+  userName: {
+    fontSize: 18,
     fontWeight: 'bold',
-    marginBottom: 4,
   },
-  onlineUser: {
-    backgroundColor: '#e0f7e9',
-    paddingVertical: 4,
-    paddingHorizontal: 10,
-    borderRadius: 12,
-    marginRight: 8,
+  userPhone: {
+    fontSize: 16,
+    color: '#666',
   },
-  chatList: {
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    flexGrow: 1,
-    justifyContent: 'flex-end',
+  chatContainer: {
+    flex: 1,
+    padding: 16,
+  },
+  chatHeader: {
+    fontSize: 24,
+    fontWeight: 'bold',
+    color: '#333',
+    marginBottom: 16,
+  },
+  messagesList: {
+    flex: 1,
   },
   messageContainer: {
     flexDirection: 'row',
     marginBottom: 12,
-    alignItems: 'flex-end',
   },
   myMessageContainer: {
-    flexDirection: 'row-reverse',
+    justifyContent: 'flex-end',
+    alignSelf: 'flex-end',
   },
   otherMessageContainer: {
-    flexDirection: 'row',
+    justifyContent: 'flex-start',
+    alignSelf: 'flex-start',
   },
   avatar: {
     width: 36,
     height: 36,
     borderRadius: 18,
-    backgroundColor: '#ccc',
+    backgroundColor: '#007aff',
     justifyContent: 'center',
     alignItems: 'center',
-    marginHorizontal: 8,
+    marginRight: 12,
   },
   avatarText: {
     color: '#fff',
@@ -312,67 +446,52 @@ const styles = StyleSheet.create({
   },
   messageBubble: {
     maxWidth: '75%',
-    padding: 10,
-    borderRadius: 16,
-    backgroundColor: '#f0f0f0',
+    padding: 12,
+    borderRadius: 10,
+    backgroundColor: '#e5e5e5',
   },
   myMessage: {
-    backgroundColor: '#dcf8c6',
+    backgroundColor: '#007aff',
+    alignSelf: 'flex-end',
+    color: '#fff',
   },
   otherMessage: {
-    backgroundColor: '#e5e5ea',
+    backgroundColor: '#f1f1f1',
+    alignSelf: 'flex-start',
   },
   senderName: {
-    fontSize: 12,
     fontWeight: 'bold',
-    color: '#555',
-    marginBottom: 2,
+    fontSize: 14,
+    marginBottom: 5,
   },
   messageText: {
     fontSize: 16,
   },
   timestamp: {
-    fontSize: 11,
+    fontSize: 12,
     color: '#777',
-    marginTop: 4,
-    textAlign: 'right',
+    marginTop: 6,
   },
   inputContainer: {
     flexDirection: 'row',
-    padding: 10,
-    borderTopWidth: 1,
-    borderTopColor: '#eee',
     alignItems: 'center',
+    marginTop: 16,
   },
-  input: {
+  messageInput: {
     flex: 1,
-    borderRadius: 20,
-    paddingVertical: 8,
-    paddingHorizontal: 14,
-    backgroundColor: '#f0f0f0',
+    height: 45,
+    borderColor: '#ddd',
+    borderWidth: 1,
+    paddingLeft: 12,
+    borderRadius: 8,
     fontSize: 16,
-    maxHeight: 100,
-  },
-  sendButton: {
-    marginLeft: 8,
-    backgroundColor: '#25D366',
-    paddingVertical: 10,
-    paddingHorizontal: 16,
-    borderRadius: 20,
-  },
-  sendButtonText: {
-    color: '#fff',
-    fontWeight: 'bold',
   },
   clearButton: {
-    marginLeft: 8,
-    backgroundColor: '#ff5252',
-    padding: 10,
-    borderRadius: 20,
+    marginLeft: 16,
+    paddingVertical: 8,
   },
-  empty: {
-    textAlign: 'center',
-    color: '#888',
-    marginTop: 40,
+  clearButtonText: {
+    color: 'red',
+    fontSize: 14,
   },
 });
